@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IAM Roles Anywhere — From X.509 Identity to Temporary AWS Credentials</title>
+  <meta name="description" content="A practical homelab guide to understanding and setting up AWS IAM Roles Anywhere with an external CA, X.509 certificates, IAM roles, profiles, and temporary credentials.">
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --card: #ffffff;
+      --text: #172033;
+      --muted: #5d687a;
+      --line: #dfe4ea;
+      --accent: #5b4bdb;
+      --accent-soft: #eeeaff;
+      --code: #151a23;
+      --code-text: #e8edf5;
+      --good: #147a4b;
+      --warn: #9a6500;
+      --shadow: 0 8px 28px rgba(23,32,51,.07);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    header {
+      background: linear-gradient(135deg, #171b2a 0%, #29204d 55%, #43339b 100%);
+      color: white;
+      padding: 72px 24px 64px;
+    }
+    .wrap { max-width: 1080px; margin: 0 auto; }
+    header .wrap { max-width: 900px; }
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-size: .78rem;
+      font-weight: 700;
+      opacity: .72;
+    }
+    h1 { font-size: clamp(2.2rem, 5vw, 4rem); line-height: 1.05; margin: 12px 0 18px; }
+    .hero p { font-size: 1.15rem; max-width: 760px; color: #e7e4f5; }
+    main { padding: 42px 24px 80px; }
+    section { margin: 42px 0; }
+    h2 { font-size: 1.8rem; margin-bottom: 14px; }
+    h3 { margin-top: 28px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 26px;
+      box-shadow: var(--shadow);
+      margin: 18px 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .concept strong { display:block; font-size: 1.1rem; margin-bottom: 5px; }
+    .tag {
+      display:inline-block;
+      background: var(--accent-soft);
+      color: #4635b0;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: .78rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    pre {
+      overflow-x: auto;
+      background: var(--code);
+      color: var(--code-text);
+      padding: 18px;
+      border-radius: 12px;
+      line-height: 1.5;
+      font-size: .88rem;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    :not(pre) > code {
+      background: #eceff3;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: .9em;
+    }
+    .flow {
+      display: grid;
+      gap: 10px;
+      justify-items: center;
+      margin: 24px 0;
+    }
+    .flow .box {
+      width: min(680px, 100%);
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 12px;
+      padding: 14px 18px;
+      text-align: center;
+      box-shadow: 0 4px 16px rgba(23,32,51,.05);
+    }
+    .arrow { color: var(--accent); font-weight: 800; }
+    .note {
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 14px 18px;
+      border-radius: 8px;
+    }
+    .warning {
+      border-left: 4px solid #c58a19;
+      background: #fff8e7;
+      padding: 14px 18px;
+      border-radius: 8px;
+    }
+    table { width:100%; border-collapse: collapse; margin: 18px 0; background:white; border-radius:12px; overflow:hidden; }
+    th, td { text-align:left; padding: 12px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { background:#f0f2f5; }
+    li { margin: 7px 0; }
+    .checklist li { list-style: "✓  "; padding-left: 6px; }
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 28px 24px 50px;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+    a { color: #4a3bc1; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap hero">
+    <div class="eyebrow">Homelab IAM Notes</div>
+    <h1>IAM Roles Anywhere</h1>
+    <p>
+      How a workload running outside AWS can use an X.509 certificate to obtain
+      temporary AWS credentials — without storing long-lived AWS access keys on the machine.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section id="idea">
+    <h2>The idea</h2>
+    <div class="card">
+      <p>
+        AWS IAM roles are a convenient way to give workloads temporary credentials.
+        Inside AWS, services such as EC2 can obtain role credentials through AWS-native
+        identity mechanisms. But a server outside AWS — a homelab VM, on-prem server,
+        container host, or another environment — does not have an EC2 instance profile.
+      </p>
+      <p>
+        IAM Roles Anywhere extends the same temporary-role model to workloads outside AWS.
+        The workload proves its identity with an X.509 certificate and its corresponding
+        private key. IAM Roles Anywhere validates the certificate chain, authorizes the
+        requested IAM role, and returns temporary AWS credentials.
+      </p>
+    </div>
+
+    <div class="flow">
+      <div class="box"><strong>Debian VM outside AWS</strong><br>X.509 certificate + private key</div>
+      <div class="arrow">↓ authenticate</div>
+      <div class="box"><strong>IAM Roles Anywhere</strong><br>Validate certificate, trust chain, and role trust</div>
+      <div class="arrow">↓ issue temporary credentials</div>
+      <div class="box"><strong>IAM Role</strong><br>Normal IAM permissions determine what the workload can access</div>
+      <div class="arrow">↓</div>
+      <div class="box"><strong>AWS APIs</strong><br>SSM Parameter Store, S3, DynamoDB, etc.</div>
+    </div>
+  </section>
+
+  <section id="mental-model">
+    <h2>The mental model</h2>
+    <div class="grid">
+      <div class="card concept">
+        <span class="tag">Authentication</span>
+        <strong>Trust Anchor</strong>
+        AWS trusts a configured CA certificate. A workload certificate must chain to that CA.
+      </div>
+      <div class="card concept">
+        <span class="tag">Authorization</span>
+        <strong>IAM Role</strong>
+        The role defines the AWS permissions available to the workload.
+      </div>
+      <div class="card concept">
+        <span class="tag">Session</span>
+        <strong>Profile</strong>
+        The profile selects the role(s) and can optionally apply session policies that further
+        restrict the permissions of the resulting session.
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>Remember:</strong> the certificate says who the workload is,
+      the private key proves possession of that identity, and the IAM role says what
+      that identity is allowed to do.
+    </div>
+  </section>
+
+  <section id="setup">
+    <h2>Practical setup</h2>
+
+    <h3>1. Create a private CA</h3>
+    <div class="card">
+      <p>
+        For a homelab, create a dedicated private CA for workload identities.
+        In this example the CA is named <code>IAM Workload CA</code>.
+      </p>
+      <p>
+        The CA is the root of trust for workload certificates. Do not use a public
+        certificate such as a Let's Encrypt server certificate as the Roles Anywhere
+        trust anchor. AWS documents that certificates issued by public CAs cannot be
+        used as trust anchors.
+      </p>
+      <p>
+        In this lab, the CA was created with pfSense's Certificate Manager.
+      </p>
+    </div>
+
+    <h3>2. Issue a workload certificate</h3>
+    <div class="card">
+      <p>
+        Create an end-entity certificate for the workload. Example:
+      </p>
+      <ul>
+        <li>Subject / CN: <code>dev</code></li>
+        <li>Issuer: <code>IAM Workload CA</code></li>
+        <li>CA: <code>FALSE</code></li>
+        <li>Key usage: Digital Signature</li>
+        <li>Extended key usage: Client Authentication</li>
+      </ul>
+      <p>
+        The private key stays on the workload. Only the certificate and its public
+        information need to participate in the authentication exchange.
+      </p>
+    </div>
+
+    <h3>3. Create the IAM Roles Anywhere trust anchor</h3>
+    <div class="card">
+      <p>In AWS:</p>
+      <ol>
+        <li>Open IAM Roles Anywhere.</li>
+        <li>Choose <strong>Create a trust anchor</strong>.</li>
+        <li>Choose <strong>External certificate bundle</strong>.</li>
+        <li>Upload/paste the PEM-encoded CA certificate.</li>
+        <li>Create the trust anchor.</li>
+      </ol>
+      <p>
+        The trust anchor establishes the trust relationship between IAM Roles Anywhere
+        and your external PKI.
+      </p>
+    </div>
+
+    <h3>4. Create the IAM role</h3>
+    <div class="card">
+      <p>
+        Create a normal IAM role. This is the role whose permissions the workload will
+        receive through temporary credentials.
+      </p>
+      <p>
+        The role's trust policy must allow the IAM Roles Anywhere service principal:
+      </p>
+<pre><code>{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "rolesanywhere.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession",
+        "sts:SetSourceIdentity"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "aws:SourceArn":
+            "arn:aws:rolesanywhere:REGION:ACCOUNT_ID:trust-anchor/TRUST_ANCHOR_ID"
+        },
+        "StringEquals": {
+          "aws:PrincipalTag/x509Subject/CN": "dev",
+          "aws:PrincipalTag/x509Issuer/CN": "IAM Workload CA"
+        }
+      }
+    }
+  ]
+}</code></pre>
+      <div class="warning">
+        <strong>Important:</strong> scope the role trust policy. Without appropriate
+        conditions, certificates from a trusted CA may be able to assume the role.
+        Conditions based on certificate attributes help restrict which identities can
+        assume which roles.
+      </div>
+    </div>
+
+    <h3>5. Give the role application permissions</h3>
+    <div class="card">
+      <p>
+        Keep the actual resource permissions on the IAM role. For example, a development
+        workload might only need access to its own SSM Parameter Store path:
+      </p>
+<pre><code>{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource":
+        "arn:aws:ssm:us-west-2:ACCOUNT_ID:parameter/myapp/dev/*"
+    }
+  ]
+}</code></pre>
+      <p>
+        The role is the main authorization boundary. Start with least privilege rather
+        than giving the workload broad AWS permissions.
+      </p>
+    </div>
+
+    <h3>6. Create a Roles Anywhere profile</h3>
+    <div class="card">
+      <p>
+        Create a profile and select the IAM role created above.
+      </p>
+      <p>
+        A profile can also contain a session policy. A session policy does
+        <strong>not grant additional permissions</strong>; it can only further restrict
+        the permissions available in the role session.
+      </p>
+      <p>
+        During initial testing, a session policy of <code>Allow *</code> / <code>Resource *</code>
+        effectively places no additional restriction on the role. Once the role is
+        least-privileged, a narrower session policy can be used as an additional guardrail.
+      </p>
+    </div>
+
+    <h3>7. Install the Roles Anywhere credential helper</h3>
+    <div class="card">
+      <p>
+        AWS provides <code>aws_signing_helper</code>. The helper uses the workload
+        certificate and private key to authenticate and obtain temporary credentials.
+      </p>
+<pre><code>/usr/local/bin/aws_signing_helper credential-process \
+  --certificate /etc/iamra/dev-roles-anywhere.crt \
+  --private-key /etc/iamra/dev-roles-anywhere.key \
+  --trust-anchor-arn arn:aws:rolesanywhere:REGION:ACCOUNT_ID:trust-anchor/TRUST_ANCHOR_ID \
+  --profile-arn arn:aws:rolesanywhere:REGION:ACCOUNT_ID:profile/PROFILE_ID \
+  --role-arn arn:aws:iam::ACCOUNT_ID:role/HomelabDevRole \
+  --region us-west-2</code></pre>
+      <p>
+        The helper returns short-lived AWS credentials in the format expected by
+        AWS's <code>credential_process</code>.
+      </p>
+    </div>
+
+    <h3>8. Configure AWS CLI</h3>
+    <div class="card">
+      <p>
+        Configure a named AWS CLI profile. The entire <code>credential_process</code>
+        command should be on one line in the AWS config file; shell-style line
+        continuations do not apply there.
+      </p>
+<pre><code>[profile homelab-dev]
+region = us-west-2
+credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/iamra/dev-roles-anywhere.crt --private-key /etc/iamra/dev-roles-anywhere.key --trust-anchor-arn arn:aws:rolesanywhere:REGION:ACCOUNT_ID:trust-anchor/TRUST_ANCHOR_ID --profile-arn arn:aws:rolesanywhere:REGION:ACCOUNT_ID:profile/PROFILE_ID --role-arn arn:aws:iam::ACCOUNT_ID:role/HomelabDevRole --region us-west-2</code></pre>
+    </div>
+
+    <h3>9. Test the identity</h3>
+    <div class="card">
+<pre><code>AWS_PROFILE=homelab-dev aws sts get-caller-identity</code></pre>
+      <p>
+        If successful, AWS has accepted the certificate, validated the trust chain,
+        authorized the Roles Anywhere session, and returned temporary credentials
+        for the IAM role.
+      </p>
+      <p>Then test the actual resource permission:</p>
+<pre><code>AWS_PROFILE=homelab-dev \
+  aws ssm get-parameter \
+  --name /myapp/dev/test \
+  --with-decryption</code></pre>
+    </div>
+  </section>
+
+  <section id="authentication">
+    <h2>What happens during authentication?</h2>
+    <div class="card">
+      <ol>
+        <li>The workload sends a Roles Anywhere <code>CreateSession</code> request.</li>
+        <li>The request is cryptographically signed using the private key corresponding to its X.509 certificate.</li>
+        <li>AWS verifies the signature against the certificate's public key.</li>
+        <li>AWS validates that the certificate chains to a configured trust anchor.</li>
+        <li>AWS evaluates the target IAM role's trust policy and certificate attributes.</li>
+        <li>Roles Anywhere obtains a session for the permitted IAM role.</li>
+        <li>The workload receives temporary AWS credentials.</li>
+      </ol>
+    </div>
+
+    <div class="flow">
+      <div class="box">Certificate: <strong>"I am dev"</strong></div>
+      <div class="arrow">+</div>
+      <div class="box">Private key: <strong>"I possess the key belonging to this certificate"</strong></div>
+      <div class="arrow">+</div>
+      <div class="box">Trust Anchor: <strong>"I trust the CA that issued this certificate"</strong></div>
+      <div class="arrow">+</div>
+      <div class="box">Role trust policy: <strong>"This identity may assume this role"</strong></div>
+      <div class="arrow">=</div>
+      <div class="box"><strong>Temporary AWS credentials</strong></div>
+    </div>
+  </section>
+
+  <section id="security">
+    <h2>Security model</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Question it answers</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CA / Trust Anchor</td>
+          <td>Which certificate authority do I trust?</td>
+        </tr>
+        <tr>
+          <td>Certificate</td>
+          <td>Which workload identity was issued by that CA?</td>
+        </tr>
+        <tr>
+          <td>Private key</td>
+          <td>Does the workload actually possess the private key corresponding to the certificate?</td>
+        </tr>
+        <tr>
+          <td>Role trust policy</td>
+          <td>Is this authenticated identity allowed to assume this particular role?</td>
+        </tr>
+        <tr>
+          <td>IAM role permissions</td>
+          <td>What AWS resources and actions can the role access?</td>
+        </tr>
+        <tr>
+          <td>Profile session policy</td>
+          <td>Should this particular Roles Anywhere session be restricted further?</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <strong>Most important security property:</strong> the Debian VM does not need
+      a long-lived AWS access key and secret key. It proves possession of its private
+      key, receives temporary AWS credentials, and uses those credentials to call AWS.
+    </div>
+  </section>
+
+  <section id="homelab">
+    <h2>Homelab example</h2>
+    <div class="card">
+<pre><code>pfSense
+  │
+  └── IAM Workload CA
+          │
+          ├── dev certificate
+          │      │
+          │      ▼
+          │   Debian Dev VM
+          │      │
+          │      │ Roles Anywhere
+          │      ▼
+          │   HomelabDevRole
+          │      │
+          │      └── ssm:GetParameter
+          │          /myapp/dev/*
+          │
+          └── stage certificate
+                 │
+                 ▼
+              Stage VM
+                 │
+                 ▼
+           HomelabStageRole
+                 │
+                 └── ssm:GetParameter
+                     /myapp/stage/*</code></pre>
+      <p>
+        This gives each environment its own workload identity and IAM authorization
+        boundary instead of sharing one AWS credential across environments.
+      </p>
+    </div>
+  </section>
+
+  <section id="deployment">
+    <h2>What this enables</h2>
+    <div class="card">
+      <p>
+        In the homelab deployment system, the Dev VM can use Roles Anywhere to retrieve
+        application secrets from Parameter Store without storing long-lived AWS keys.
+      </p>
+<pre><code>Gitea Runner
+    │
+    │ Ansible / SSH
+    ▼
+Dev VM
+    │
+    ├── AWS credential_process
+    │       │
+    │       └── IAM Roles Anywhere
+    │               │
+    │               └── temporary AWS credentials
+    │
+    ├── SSM GetParameter
+    │       ↓
+    │   /myapp/dev/*
+    │
+    ├── write secret file
+    │
+    ├── docker compose pull
+    │
+    └── docker compose up -d</code></pre>
+      <p>
+        The application container itself does not need AWS credentials in this design.
+        The host retrieves the secret and mounts the resulting secret file into the
+        container read-only.
+      </p>
+    </div>
+  </section>
+
+  <section id="checklist">
+    <h2>Setup checklist</h2>
+    <div class="card">
+      <ul class="checklist">
+        <li>Create a dedicated private CA for workload identity.</li>
+        <li>Issue an end-entity certificate for the workload.</li>
+        <li>Create an external-CA trust anchor in IAM Roles Anywhere.</li>
+        <li>Create an IAM role with a tightly scoped trust policy.</li>
+        <li>Attach least-privilege resource permissions to the role.</li>
+        <li>Create a Roles Anywhere profile and associate the role.</li>
+        <li>Optionally configure a session policy as an additional restriction.</li>
+        <li>Install the AWS Roles Anywhere credential helper.</li>
+        <li>Protect the certificate's private key on the workload.</li>
+        <li>Configure AWS CLI <code>credential_process</code>.</li>
+        <li>Verify with <code>aws sts get-caller-identity</code>.</li>
+        <li>Test the actual AWS resource permission.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>References</h2>
+    <div class="card">
+      <ul>
+        <li><a href="https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html">AWS IAM Roles Anywhere overview</a></li>
+        <li><a href="https://docs.aws.amazon.com/rolesanywhere/latest/userguide/getting-started.html">AWS: Getting started with IAM Roles Anywhere</a></li>
+        <li><a href="https://docs.aws.amazon.com/rolesanywhere/latest/userguide/trust-model.html">AWS: IAM Roles Anywhere trust model</a></li>
+        <li><a href="https://docs.aws.amazon.com/rolesanywhere/latest/userguide/authentication.html">AWS: Authentication process</a></li>
+        <li><a href="https://docs.aws.amazon.com/rolesanywhere/latest/userguide/credential-helper.html">AWS: Credential helper</a></li>
+      </ul>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Homelab IAM Notes · IAM Roles Anywhere · Last reviewed September 2026
+  </div>
+</footer>
+</body>
+</html>
